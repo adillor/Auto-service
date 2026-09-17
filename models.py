@@ -17,6 +17,23 @@ class Client:
     def __init__(self, name: str, phone: str):
         self.name = name
         self.phone = phone
+        self.cars = []
+
+    def add_car(self, car: 'Car'):
+        if car in self.cars:
+            raise DomainError(f"Авто {car.vin} уже привязано к клиенту {self.name}.")
+
+        if car.owner and car.owner != self:
+            car.owner.remove_car(car)
+
+        self.cars.append(car)
+        car.owner = self
+
+    def remove_car(self, car: 'Car'):
+        if car not in self.cars:
+            raise DomainError(f"Авто {car.vin} не принадлежит клиенту {self.name}.")
+        self.cars.remove(car)
+        car.owner = None
 
     def __str__(self):
         return f"Клиент {self.name} телефон:{self.phone}"
@@ -27,12 +44,12 @@ class Car:
         self.make = make
         self.model = model
         self.vin = vin
-        self.owner = owner
-
+        self.owner = None
+        if owner:
+            owner.add_car(self)
     def __str__(self):
         owner_name = self.owner.name if self.owner else "Нет владельца"
         return f"Авто: {self.make} {self.model} [{self.vin}] — Владелец: {owner_name}"
-
 
 class Mechanic:
     def __init__(self, name: str, role: str):
@@ -101,63 +118,39 @@ class Service_order:
     def __str__(self):
         mech_str = self.mechanic.name if self.mechanic else "Не назначен"
         return f"Заказ №{self.order_id} [{self.status}] | Авто: {self.car.make} {self.car.model} | Механик: {mech_str} | Итого: {self.calculate_total()} руб."
+    def add_service(self, service: Service, quantity: int = 1):
+        if self.status == "completed":
+            raise InvalidStatusError("Нельзя добавлять услуги в завершённый заказ!")
 
+        item = Order_item(service, quantity=quantity)
+        self.items.append(item)
 
 if __name__ == "__main__":
-    print("=== УСПЕШНЫЙ СЦЕНАРИЙ OBSLUZHIVANIYA ===")
-    
-    client1 = Client("adil", "+7-777-777-77-77")
-    client2 = Client("ООО Adil", "+7-777-777-77-67")
+    print("PR-03")
 
-    car1 = Car("Toyota", "Camry", "А123АА777", client1)
-    car2 = Car("GAZ", "Gazelle", "В456ВВ777", client2)
+    client1 = Client("adil", "+7-777-777-77-77")
+    car1 = Car("Toyota", "Camry", "А123АА777")
+    car2 = Car("GAZ", "Gazelle", "В456ВВ777")
+
+    client1.add_car(car1)
+    client1.add_car(car2)
+
+    print(f"Машины клиента {client1.name}: {[c.make for c in client1.cars]}")
+    print(f"Владелец машины {car1.make}: {car1.owner.name}")
+
+    client2 = Client("ООО Adil", "+7-777-777-77-67")
+    client2.add_car(car1)
+
+    print(f"Машины client1 после продажи Camry: {[c.make for c in client1.cars]}")
+    print(f"Машины client2: {[c.make for c in client2.cars]}")
+    print(f"Новый владелец Camry: {car1.owner.name}")
 
     mechanic1 = Mechanic("Алексей", "Моторист")
-
     service1 = Service("Замена масла", 1500.0)
-    service2 = Service("Диагностика двигателя", 2000.0)
 
-    item1 = Order_item(service1, quantity=1)
-    item2 = Order_item(service2, quantity=1)
-
-    order1 = Service_order(order_id=1, car=car1)
-    print(f"1. Создан заказ: {order1}")
-
-    order1.assign_mechanic(mechanic1)
-    order1.add_item(item1)
-    order1.add_item(item2)
-    print(f"2. Назначен механик и добавлены услуги: {order1}")
+    order1 = Service_order(order_id=1, car=car2, mechanic=mechanic1)
+    order1.add_service(service1, quantity=1)
 
     order1.start_order()
-    print(f"3. Заказ запущен в работу: {order1}")
-
     order1.complete_order()
-    print(f"4. Заказ успешно завершён: {order1}\n")
-
-    print("=== ДЕМОНСТРАЦИЯ ЗАПРЕЩЁННЫХ ОПЕРАЦИЙ ===")
-
-    order2 = Service_order(order_id=2, car=car2)
-    try:
-        print("Попытка запустить пустой заказ...")
-        order2.start_order()
-    except OrderValidationError as e:
-        print(f" [БЛОКИРОВКА]: {e}")
-
-    order2.add_item(item1)
-    try:
-        print("Попытка запустить заказ без механика...")
-        order2.start_order()
-    except OrderValidationError as e:
-        print(f" [БЛОКИРОВКА]: {e}")
-
-    try:
-        print("Попытка добавить услугу в завершённый заказ №1...")
-        order1.add_item(item1)
-    except InvalidStatusError as e:
-        print(f" [БЛОКИРОВКА]: {e}")
-
-    try:
-        print("Попытка повторно запустить закрытый заказ №1...")
-        order1.start_order()
-    except InvalidStatusError as e:
-        print(f" [БЛОКИРОВКА]: {e}")
+    print(f"\nИтог заказа: {order1}")
