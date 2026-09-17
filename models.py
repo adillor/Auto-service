@@ -1,16 +1,58 @@
+from abc import ABC, abstractmethod
+
+
 class DomainError(Exception):
-    """Базовое исключение для ошибок предметной области автосервиса."""
     pass
 
 
 class InvalidStatusError(DomainError):
-    """Исключение при попытке выполнить недопустимую операцию для текущего статуса."""
     pass
 
 
 class OrderValidationError(DomainError):
-    """Исключение при попытке запустить заказ без выполнения бизнес-условий."""
     pass
+
+
+class DiscountStrategy(ABC):
+    @abstractmethod
+    def calculate(self, amount: float) -> float:
+        pass
+
+
+class NoDiscount(DiscountStrategy):
+    def calculate(self, amount: float) -> float:
+        return 0.0
+
+
+class PercentageDiscount(DiscountStrategy):
+    def __init__(self, percent: float):
+        if not (0 <= percent <= 100):
+            raise DomainError("Некорректный процент скидки")
+        self.percent = percent
+
+    def calculate(self, amount: float) -> float:
+        return amount * (self.percent / 100.0)
+
+
+class FixedDiscount(DiscountStrategy):
+    def __init__(self, discount_amount: float):
+        if discount_amount < 0:
+            raise DomainError("Скидка не может быть отрицательной")
+        self.discount_amount = discount_amount
+
+    def calculate(self, amount: float) -> float:
+        return min(amount, self.discount_amount)
+
+
+class ThresholdDiscount(DiscountStrategy):
+    def __init__(self, threshold: float, percent: float):
+        self.threshold = threshold
+        self.percent = percent
+
+    def calculate(self, amount: float) -> float:
+        if amount >= self.threshold:
+            return amount * (self.percent / 100.0)
+        return 0.0
 
 
 class Client:
@@ -47,9 +89,11 @@ class Car:
         self.owner = None
         if owner:
             owner.add_car(self)
+
     def __str__(self):
         owner_name = self.owner.name if self.owner else "Нет владельца"
         return f"Авто: {self.make} {self.model} [{self.vin}] — Владелец: {owner_name}"
+
 
 class Mechanic:
     def __init__(self, name: str, role: str):
@@ -81,12 +125,13 @@ class Order_item:
 
 
 class Service_order:
-    def __init__(self, order_id: int, car: Car, mechanic: Mechanic = None):
+    def __init__(self, order_id: int, car: Car, mechanic: Mechanic = None, discount: DiscountStrategy = None):
         self.order_id = order_id
         self.car = car
         self.mechanic = mechanic
         self.status = "new"
         self.items = []
+        self.discount = discount if discount is not None else NoDiscount()
 
     def assign_mechanic(self, mechanic: Mechanic):
         if self.status == "completed":
@@ -96,6 +141,12 @@ class Service_order:
     def add_item(self, item: Order_item):
         if self.status == "completed":
             raise InvalidStatusError("Нельзя добавлять услуги в завершённый заказ!")
+        self.items.append(item)
+
+    def add_service(self, service: Service, quantity: int = 1):
+        if self.status == "completed":
+            raise InvalidStatusError("Нельзя добавлять услуги в завершённый заказ!")
+        item = Order_item(service, quantity=quantity)
         self.items.append(item)
 
     def start_order(self):
@@ -112,45 +163,43 @@ class Service_order:
             raise InvalidStatusError("Завершить можно только заказ, находящийся в работе!")
         self.status = "completed"
 
-    def calculate_total(self) -> float:
+    def calculate_raw_total(self) -> float:
         return sum(item.price * item.quantity for item in self.items)
+
+    def calculate_total(self) -> float:
+        raw_total = self.calculate_raw_total()
+        discount_amount = self.discount.calculate(raw_total)
+        return raw_total - discount_amount
 
     def __str__(self):
         mech_str = self.mechanic.name if self.mechanic else "Не назначен"
-        return f"Заказ №{self.order_id} [{self.status}] | Авто: {self.car.make} {self.car.model} | Механик: {mech_str} | Итого: {self.calculate_total()} руб."
-    def add_service(self, service: Service, quantity: int = 1):
-        if self.status == "completed":
-            raise InvalidStatusError("Нельзя добавлять услуги в завершённый заказ!")
+        return f"Заказ №{self.order_id} [{self.status}] | Авто: {self.car.make} {self.car.model} | Механик: {mech_str} | Сумма: {self.calculate_raw_total()} руб. | К оплате: {self.calculate_total()} руб."
 
-        item = Order_item(service, quantity=quantity)
-        self.items.append(item)
 
 if __name__ == "__main__":
-    print("PR-03")
-
     client1 = Client("adil", "+7-777-777-77-77")
-    car1 = Car("Toyota", "Camry", "А123АА777")
-    car2 = Car("GAZ", "Gazelle", "В456ВВ777")
-
-    client1.add_car(car1)
-    client1.add_car(car2)
-
-    print(f"Машины клиента {client1.name}: {[c.make for c in client1.cars]}")
-    print(f"Владелец машины {car1.make}: {car1.owner.name}")
-
-    client2 = Client("ООО Adil", "+7-777-777-77-67")
-    client2.add_car(car1)
-
-    print(f"Машины client1 после продажи Camry: {[c.make for c in client1.cars]}")
-    print(f"Машины client2: {[c.make for c in client2.cars]}")
-    print(f"Новый владелец Camry: {car1.owner.name}")
-
+    car1 = Car("Toyota", "Camry", "А123АА777", owner=client1)
     mechanic1 = Mechanic("Алексей", "Моторист")
+
     service1 = Service("Замена масла", 1500.0)
+    service2 = Service("Диагностика", 2500.0)
 
-    order1 = Service_order(order_id=1, car=car2, mechanic=mechanic1)
-    order1.add_service(service1, quantity=1)
+    order1 = Service_order(order_id=1, car=car1, mechanic=mechanic1, discount=NoDiscount())
+    order1.add_service(service1)
+    order1.add_service(service2)
+    print(f"Без скидки: {order1}")
 
-    order1.start_order()
-    order1.complete_order()
-    print(f"\nИтог заказа: {order1}")
+    order2 = Service_order(order_id=2, car=car1, mechanic=mechanic1, discount=PercentageDiscount(10.0))
+    order2.add_service(service1)
+    order2.add_service(service2)
+    print(f"Скидка 10%: {order2}")
+
+    order3 = Service_order(order_id=3, car=car1, mechanic=mechanic1, discount=FixedDiscount(500.0))
+    order3.add_service(service1)
+    order3.add_service(service2)
+    print(f"Скидка 500 руб: {order3}")
+
+    order4 = Service_order(order_id=4, car=car1, mechanic=mechanic1, discount=ThresholdDiscount(3000.0, 15.0))
+    order4.add_service(service1)
+    order4.add_service(service2)
+    print(f"Пороговая скидка (15% при заказе от 3000): {order4}")
