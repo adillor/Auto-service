@@ -113,7 +113,7 @@ class Service:
         return f"Услуга: {self.title} — {self.base_price}."
 
 
-class Order_item:
+class OrderItem:
     def __init__(self, service: Service, price: float = None, quantity: int = 1):
         self.service = service
         self.price = price if price is not None else service.base_price
@@ -124,7 +124,7 @@ class Order_item:
         return f"Позиция: {self.service.title} x{self.quantity} = {total}."
 
 
-class Service_order:
+class ServiceOrder:
     def __init__(self, order_id: int, car: Car, mechanic: Mechanic = None, discount: DiscountStrategy = None):
         self.order_id = order_id
         self.car = car
@@ -138,7 +138,7 @@ class Service_order:
             raise InvalidStatusError("Нельзя менять механика в завершённом заказе!")
         self.mechanic = mechanic
 
-    def add_item(self, item: Order_item):
+    def add_item(self, item: OrderItem):
         if self.status == "completed":
             raise InvalidStatusError("Нельзя добавлять услуги в завершённый заказ!")
         self.items.append(item)
@@ -146,7 +146,7 @@ class Service_order:
     def add_service(self, service: Service, quantity: int = 1):
         if self.status == "completed":
             raise InvalidStatusError("Нельзя добавлять услуги в завершённый заказ!")
-        item = Order_item(service, quantity=quantity)
+        item = OrderItem(service, quantity=quantity)
         self.items.append(item)
 
     def start_order(self):
@@ -174,32 +174,3 @@ class Service_order:
     def __str__(self):
         mech_str = self.mechanic.name if self.mechanic else "Не назначен"
         return f"Заказ №{self.order_id} [{self.status}] | Авто: {self.car.make} {self.car.model} | Механик: {mech_str} | Сумма: {self.calculate_raw_total()} руб. | К оплате: {self.calculate_total()} руб."
-
-
-if __name__ == "__main__":
-    client1 = Client("adil", "+7-777-777-77-77")
-    car1 = Car("Toyota", "Camry", "А123АА777", owner=client1)
-    mechanic1 = Mechanic("Алексей", "Моторист")
-
-    service1 = Service("Замена масла", 1500.0)
-    service2 = Service("Диагностика", 2500.0)
-
-    order1 = Service_order(order_id=1, car=car1, mechanic=mechanic1, discount=NoDiscount())
-    order1.add_service(service1)
-    order1.add_service(service2)
-    print(f"Без скидки: {order1}")
-
-    order2 = Service_order(order_id=2, car=car1, mechanic=mechanic1, discount=PercentageDiscount(10.0))
-    order2.add_service(service1)
-    order2.add_service(service2)
-    print(f"Скидка 10%: {order2}")
-
-    order3 = Service_order(order_id=3, car=car1, mechanic=mechanic1, discount=FixedDiscount(500.0))
-    order3.add_service(service1)
-    order3.add_service(service2)
-    print(f"Скидка 500 руб: {order3}")
-
-    order4 = Service_order(order_id=4, car=car1, mechanic=mechanic1, discount=ThresholdDiscount(3000.0, 15.0))
-    order4.add_service(service1)
-    order4.add_service(service2)
-    print(f"Пороговая скидка (15% при заказе от 3000): {order4}")
