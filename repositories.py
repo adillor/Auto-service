@@ -1,203 +1,177 @@
 from abc import ABC, abstractmethod
 import psycopg
-from models import (
-    Client, Car, Mechanic, Service, ServiceOrder,
-    NoDiscount, PercentageDiscount, FixedDiscount, ThresholdDiscount
-)
+from models import Client, Car, ServiceOrder  # Импортируем все сущности
 
-class AbstractRepository(ABC):
+
+# --- 1. БАЗОВЫЕ КЛАССЫ (Инфраструктура) ---
+
+class EntityMapper(ABC):
+    """Интерфейс, сообщающий persistence-механизму сведения о классе."""
+    table_name: str
+    primary_key: str = "id"
+    fields: list[str]
+
     @abstractmethod
+    def to_dict(self, entity) -> dict:
+        """Преобразует объект в словарь для INSERT / UPDATE."""
+        pass
+
+    @abstractmethod
+    def to_entity(self, row: tuple, cur_description) -> object:
+        """Преобразует кортеж из БД обратно в объект доменной модели."""
+        pass
+
+
+class BaseRepository:
+    """Универсальный репозиторий, реализующий общий CRUD-код."""
+    def __init__(self, conn: psycopg.Connection, mapper: EntityMapper):
+        self.conn = conn
+        self.mapper = mapper
+
+    def _execute(self, query: str, params: tuple = (), fetch_one=False, fetch_all=False):
+        """Единый механизм выполнения запросов."""
+        with self.conn.cursor() as cur:
+            cur.execute(query, params)
+            if fetch_one:
+                return cur.fetchone(), cur.description
+            if fetch_all:
+                return cur.fetchall(), cur.description
+            self.conn.commit()
+            return None
+
     def add(self, entity):
-        pass
+        data = self.mapper.to_dict(entity)
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(["%s"] * len(data))
+        
+        query = f"""
+            INSERT INTO {self.mapper.table_name} ({columns}) 
+            VALUES ({placeholders}) 
+            RETURNING {self.mapper.primary_key};
+        """
+        row, _ = self._execute(query, tuple(data.values()), fetch_one=True)
+        setattr(entity, self.mapper.primary_key, row[0])
+        return entity
 
-    @abstractmethod
-    def get_by_id(self, entity_id):
-        pass
+    def get_by_id(self, entity_id: int):
+        query = f"SELECT * FROM {self.mapper.table_name} WHERE {self.mapper.primary_key} = %s;"
+        row, desc = self._execute(query, (entity_id,), fetch_one=True)
+        if not row:
+            return None
+        return self.mapper.to_entity(row, desc)
 
-    @abstractmethod
-    def get_all(self):
-        pass
+    def get_all(self) -> list:
+        query = f"SELECT * FROM {self.mapper.table_name};"
+        rows, desc = self._execute(query, fetch_all=True)
+        return [self.mapper.to_entity(r, desc) for r in rows]
 
-
-class ClientRepository(AbstractRepository):
-    def __init__(self, conn):
-        self.conn = conn
-
-    def add(self, client: Client) -> Client:
+    def update(self, entity) -> bool:
+        """Операция обновления (Требование PR-07)."""
+        data = self.mapper.to_dict(entity)
+        entity_id = getattr(entity, self.mapper.primary_key)
+        set_clause = ", ".join([f"{col} = %s" for col in data.keys()])
+        
+        query = f"""
+            UPDATE {self.mapper.table_name} 
+            SET {set_clause} 
+            WHERE {self.mapper.primary_key} = %s;
+        """
+        params = tuple(data.values()) + (entity_id,)
         with self.conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO clients (name, phone) VALUES (%s, %s) RETURNING id;",
-                (client.name, client.phone)
-            )
-            client_id = cur.fetchone()[0]
+            cur.execute(query, params)
             self.conn.commit()
-            return self.get_by_id(client_id)
+            return cur.rowcount > 0
 
-    def get_by_id(self, client_id: int) -> Client | None:
+    def delete(self, entity_id: int) -> bool:
+        """Операция удаления (Требование PR-07)."""
+        query = f"DELETE FROM {self.mapper.table_name} WHERE {self.mapper.primary_key} = %s;"
         with self.conn.cursor() as cur:
-            cur.execute("SELECT id, name, phone FROM clients WHERE id = %s;", (client_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            client = Client(row[1], row[2])
-            client.id = row[0]
-            
-            cur.execute("SELECT id, make, model, vin FROM cars WHERE owner_id = %s;", (client_id,))
-            car_rows = cur.fetchall()
-            for cr in car_rows:
-                car = Car(cr[1], cr[2], cr[3], owner=client)
-                car.id = cr[0]
-            return client
-
-    def get_all(self) -> list[Client]:
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT id FROM clients;")
-            rows = cur.fetchall()
-            return [self.get_by_id(row[0]) for row in rows]
-
-
-class CarRepository(AbstractRepository):
-    def __init__(self, conn):
-        self.conn = conn
-
-    def add(self, car: Car) -> Car:
-        with self.conn.cursor() as cur:
-            owner_id = getattr(car.owner, 'id', None) if car.owner else None
-            cur.execute(
-                "INSERT INTO cars (make, model, vin, owner_id) VALUES (%s, %s, %s, %s) RETURNING id;",
-                (car.make, car.model, car.vin, owner_id)
-            )
-            car_id = cur.fetchone()[0]
-            car.id = car_id
+            cur.execute(query, (entity_id,))
             self.conn.commit()
-            return car
-
-    def get_by_id(self, car_id: int) -> Car | None:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT c.id, c.make, c.model, c.vin, cl.id, cl.name, cl.phone
-                FROM cars c
-                LEFT JOIN clients cl ON c.owner_id = cl.id
-                WHERE c.id = %s;
-                """,
-                (car_id,)
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            
-            owner = None
-            if row[4]:
-                owner = Client(row[5], row[6])
-                owner.id = row[4]
-                
-            car = Car(row[1], row[2], row[3], owner=owner)
-            car.id = row[0]
-            return car
-
-    def get_all(self) -> list[Car]:
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT id FROM cars;")
-            rows = cur.fetchall()
-            return [self.get_by_id(row[0]) for row in rows]
+            return cur.rowcount > 0
 
 
-class ServiceOrderRepository(AbstractRepository):
-    def __init__(self, conn):
-        self.conn = conn
+# --- 2. CLIENT REPOSITORY ---
 
-    def add(self, order: ServiceOrder) -> ServiceOrder:
-        with self.conn.transaction():
-            with self.conn.cursor() as cur:
-                disc_type = 'none'
-                val1, val2 = 0, 0
-                if isinstance(order.discount, PercentageDiscount):
-                    disc_type, val1 = 'percentage', order.discount.percent
-                elif isinstance(order.discount, FixedDiscount):
-                    disc_type, val1 = 'fixed', order.discount.amount
-                elif isinstance(order.discount, ThresholdDiscount):
-                    disc_type, val1, val2 = 'threshold', order.discount.threshold, order.discount.percent
+class ClientMapper(EntityMapper):
+    table_name = "clients"
+    primary_key = "id"
+    fields = ["name", "phone"]
 
-                car_id = getattr(order.car, 'id', None)
-                mechanic_id = getattr(order.mechanic, 'id', None)
+    def to_dict(self, client: Client) -> dict:
+        return {"name": client.name, "phone": client.phone}
 
-                cur.execute(
-                    """
-                    INSERT INTO service_orders 
-                    (car_id, mechanic_id, status, discount_type, discount_val1, discount_val2)
-                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;
-                    """,
-                    (car_id, mechanic_id, order.status, disc_type, val1, val2)
-                )
-                order_id = cur.fetchone()[0]
-                order.order_id = order_id
+    def to_entity(self, row: tuple, cur_description) -> Client:
+        col_names = [desc[0] for desc in cur_description]
+        data = dict(zip(col_names, row))
+        
+        client = Client(data["name"], data["phone"])
+        client.id = data["id"]
+        return client
 
-                for item in order.items:
-                    service_id = getattr(item.service, 'id', None)
-                    cur.execute(
-                        "INSERT INTO order_items (order_id, service_id, price) VALUES (%s, %s, %s);",
-                        (order_id, service_id, item.price)
-                    )
-        return self.get_by_id(order.order_id)
 
-    def get_by_id(self, order_id: int) -> ServiceOrder | None:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT so.id, so.status, so.discount_type, so.discount_val1, so.discount_val2,
-                       c.id, c.make, c.model, c.vin,
-                       m.id, m.name, m.specialization
-                FROM service_orders so
-                JOIN cars c ON so.car_id = c.id
-                LEFT JOIN mechanics m ON so.mechanic_id = m.id
-                WHERE so.id = %s;
-                """,
-                (order_id,)
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
+class ClientRepository(BaseRepository):
+    def __init__(self, conn: psycopg.Connection):
+        super().__init__(conn, ClientMapper())
 
-            car = Car(row[6], row[7], row[8])
-            car.id = row[5]
 
-            mechanic = None
-            if row[9]:
-                mechanic = Mechanic(row[10], row[11])
-                mechanic.id = row[9]
+# --- 3. CAR REPOSITORY ---
 
-            disc_type, val1, val2 = row[2], float(row[3]), float(row[4])
-            if disc_type == 'percentage':
-                discount = PercentageDiscount(val1)
-            elif disc_type == 'fixed':
-                discount = FixedDiscount(val1)
-            elif disc_type == 'threshold':
-                discount = ThresholdDiscount(val1, val2)
-            else:
-                discount = NoDiscount()
+class CarMapper(EntityMapper):
+    table_name = "cars"
+    primary_key = "id"
+    fields = ["vin", "model", "client_id"]
 
-            order = ServiceOrder(order_id=row[0], car=car, mechanic=mechanic, discount=discount)
-            order.status = row[1]
+    def to_dict(self, car: Car) -> dict:
+        return {
+            "vin": car.vin,
+            "model": car.model,
+            "client_id": car.client_id if hasattr(car, "client_id") else None
+        }
 
-            cur.execute(
-                """
-                SELECT s.id, s.title, oi.price 
-                FROM order_items oi
-                JOIN services s ON oi.service_id = s.id
-                WHERE oi.order_id = %s;
-                """,
-                (order_id,)
-            )
-            for item_row in cur.fetchall():
-                srv = Service(item_row[1], float(item_row[2]))
-                srv.id = item_row[0]
-                order.add_service(srv)
+    def to_entity(self, row: tuple, cur_description) -> Car:
+        col_names = [desc[0] for desc in cur_description]
+        data = dict(zip(col_names, row))
+        
+        car = Car(data["model"], data["vin"])
+        car.id = data["id"]
+        if "client_id" in data:
+            car.client_id = data["client_id"]
+        return car
 
-            return order
 
-    def get_all(self) -> list[ServiceOrder]:
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT id FROM service_orders;")
-            rows = cur.fetchall()
-            return [self.get_by_id(row[0]) for row in rows]
+class CarRepository(BaseRepository):
+    def __init__(self, conn: psycopg.Connection):
+        super().__init__(conn, CarMapper())
+
+
+# --- 4. SERVICE ORDER REPOSITORY ---
+
+class ServiceOrderMapper(EntityMapper):
+    table_name = "service_orders"
+    primary_key = "id"
+    fields = ["car_id", "mechanic", "status"]
+
+    def to_dict(self, order: ServiceOrder) -> dict:
+        return {
+            "car_id": getattr(order, "car_id", None),
+            "mechanic": order.mechanic,
+            "status": order.status
+        }
+
+    def to_entity(self, row: tuple, cur_description) -> ServiceOrder:
+        col_names = [desc[0] for desc in cur_description]
+        data = dict(zip(col_names, row))
+        
+        # Передаем None вместо объекта Car, если загрузка происходила без JOIN
+        order = ServiceOrder(car=None, mechanic=data["mechanic"])
+        order.id = data["id"]
+        order.status = data["status"]
+        if "car_id" in data:
+            order.car_id = data["car_id"]
+        return order
+
+
+class ServiceOrderRepository(BaseRepository):
+    def __init__(self, conn: psycopg.Connection):
+        super().__init__(conn, ServiceOrderMapper())
