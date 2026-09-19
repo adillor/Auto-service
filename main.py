@@ -1,57 +1,65 @@
-from models import Client, Car, Mechanic, Service, ServiceOrder, PercentageDiscount, ThresholdDiscount
+import psycopg
+from models import Client, Car, Mechanic, Service, ServiceOrder, PercentageDiscount
+from repositories import ClientRepository, CarRepository, ServiceOrderRepository
 
+DB_PARAMS = "dbname=autoservice user=postgres password=postgres host=localhost port=5432"
 
-def scenario_1_full_repair_cycle():
-    client = Client("Адиль", "+7-700-111-22-33")
-    car = Car("Toyota", "Camry", "VIN12345", owner=client)
-    mechanic = Mechanic("Алексей", "Моторист")
+def init_db(conn):
+    with open("schema.sql", "r", encoding="utf-8") as f:
+        schema = f.read()
+    with conn.cursor() as cur:
+        cur.execute(schema)
+    conn.commit()
 
-    service_oil = Service("Замена масла", 1500.0)
-    service_diag = Service("Компьютерная диагностика", 2500.0)
+def run_demo():
+    with psycopg.connect(DB_PARAMS) as conn:
+        init_db(conn)
 
-    order = ServiceOrder(order_id=101, car=car, discount=PercentageDiscount(10.0))
-    order.assign_mechanic(mechanic)
-    order.add_service(service_oil)
-    order.add_service(service_diag)
+        client_repo = ClientRepository(conn)
+        car_repo = CarRepository(conn)
+        order_repo = ServiceOrderRepository(conn)
 
-    order.start_order()
-    order.complete_order()
+        client = Client("Иван Иванов", "+79990001122")
+        client = client_repo.add(client)
 
-    print("--- Сценарий 1: Полный цикл обслуживания ---")
-    print(order)
+        car = Car("Toyota", "Camry", "VIN123456", owner=client)
+        car = car_repo.add(car)
 
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO mechanics (name, specialization) VALUES (%s, %s) RETURNING id;", ("Алексей", "Моторист"))
+            mech_id = cur.fetchone()[0]
+            cur.execute("INSERT INTO services (title, price) VALUES (%s, %s) RETURNING id;", ("Диагностика", 3000.0))
+            srv_id = cur.fetchone()[0]
+            conn.commit()
 
-def scenario_2_car_ownership_transfer():
-    seller = Client("Иван", "+7-700-000-00-01")
-    buyer = Client("Алексей", "+7-700-000-00-02")
-    car = Car("BMW", "X5", "VIN99999", owner=seller)
+        mechanic = Mechanic("Алексей", "Моторист")
+        mechanic.id = mech_id
+        service = Service("Диагностика", 3000.0)
+        service.id = srv_id
 
-    buyer.add_car(car)
+        order = ServiceOrder(order_id=0, car=car, mechanic=mechanic, discount=PercentageDiscount(10))
+        order.add_service(service)
+        order.start_order()
 
-    print("\n--- Сценарий 2: Передача авто новому владельцу ---")
-    print(f"Старый владелец (авто): {len(seller.cars)}")
-    print(f"Новый владелец: {car.owner.name}")
-    print(f"Машин у покупателя: {len(buyer.cars)}")
+        saved_order = order_repo.add(order)
+        order_id = saved_order.order_id
+        print(f"[СОХРАНЕНО] Заказ №{order_id} со статусом '{saved_order.status}' сохранён в PostgreSQL.")
 
+    print("\n--- Перезапуск программы и чтение из БД ---")
 
-def scenario_3_threshold_discount_order():
-    client = Client("Мария", "+7-700-333-44-55")
-    car = Car("Hyundai", "Elantra", "VIN77777", owner=client)
-    mechanic = Mechanic("Данияр", "Ходовик")
+    with psycopg.connect(DB_PARAMS) as conn:
+        order_repo = ServiceOrderRepository(conn)
+        client_repo = ClientRepository(conn)
 
-    service_brakes = Service("Замена колодок", 4000.0)
-    discount = ThresholdDiscount(threshold=3000.0, percent=15.0)
+        restored_order = order_repo.get_by_id(order_id)
+        restored_client = client_repo.get_by_id(client.id)
 
-    order = ServiceOrder(order_id=102, car=car, mechanic=mechanic, discount=discount)
-    order.add_service(service_brakes)
-
-    order.start_order()
-
-    print("\n--- Сценарий 3: Расчет заказа с пороговой скидкой ---")
-    print(order)
-
+        print(f"[ВОССТАНОВЛЕНО] Заказ №{restored_order.order_id}:")
+        print(f"  Автомобиль: {restored_order.car.make} {restored_order.car.model} (VIN: {restored_order.car.vin})")
+        print(f"  Механик: {restored_order.mechanic.name}")
+        print(f"  Статус: {restored_order.status}")
+        print(f"  Итоговая стоимость с учётом скидки: {restored_order.calculate_total()} руб.")
+        print(f"[ВОССТАНОВЛЕНО] Клиент: {restored_client.name}, Машин в гараже: {len(restored_client.cars)}")
 
 if __name__ == "__main__":
-    scenario_1_full_repair_cycle()
-    scenario_2_car_ownership_transfer()
-    scenario_3_threshold_discount_order()
+    run_demo()
