@@ -1,88 +1,157 @@
-import pytest # noqa: F401
-from models import (
-    Client, Car, Mechanic, Service, ServiceOrder,
-    PercentageDiscount, ThresholdDiscount, FixedDiscount,
-    InvalidStatusError, OrderValidationError, DomainError
-)
+from collections import namedtuple
+from datetime import datetime
+from decimal import Decimal
 
-def test_full_order_lifecycle():
-    client = Client("Адиль", "+7777")
-    car = Car("Toyota", "Camry", "VIN1", owner=client)
-    mechanic = Mechanic("Алексей", "Моторист")
-    service = Service("Замена масла", 2000.0)
+from models import Car, Client, OrderItem, Service, ServiceOrder
+from orm import Model
 
-    order = ServiceOrder(order_id=1, car=car, mechanic=mechanic)
-    order.add_service(service)
 
-    assert order.status == "new"
-    order.start_order()
-    assert order.status == "in_progress"
-    order.complete_order()
-    assert order.status == "completed"
+Column = namedtuple("Column", "name")
 
-def test_car_reassignment_between_clients():
-    client1 = Client("Иван", "+7111")
-    client2 = Client("Олег", "+7222")
-    car = Car("BMW", "X5", "VIN2", owner=client1)
 
-    assert car in client1.cars
-    client2.add_car(car)
+def result(columns=(), one=None, many=(), rowcount=1):
+    return {
+        "description": [Column(name) for name in columns],
+        "one": one,
+        "many": many,
+        "rowcount": rowcount,
+    }
 
-    assert car not in client1.cars
-    assert car in client2.cars
-    assert car.owner == client2
 
-def test_order_discounts():
-    service = Service("Ремонт", 10000.0)
-    car = Car("Audi", "A6", "VIN3")
+class FakeCursor:
+    def __init__(self, results):
+        self.results = iter(results)
+        self.executed = []
+        self.description = []
+        self.current = result()
+        self.rowcount = 1
 
-    order_percent = ServiceOrder(1, car, discount=PercentageDiscount(10))
-    order_percent.add_service(service)
-    assert order_percent.calculate_total() == 9000.0
+    def __enter__(self):
+        return self
 
-    order_threshold_active = ServiceOrder(2, car, discount=ThresholdDiscount(5000, 20))
-    order_threshold_active.add_service(service)
-    assert order_threshold_active.calculate_total() == 8000.0
+    def __exit__(self, *args):
+        return False
 
-    order_threshold_inactive = ServiceOrder(3, car, discount=ThresholdDiscount(15000, 20))
-    order_threshold_inactive.add_service(service)
-    assert order_threshold_inactive.calculate_total() == 10000.0
+    def execute(self, query, params=()):
+        self.executed.append((query, params))
+        self.current = next(self.results, result())
+        self.description = self.current["description"]
+        self.rowcount = self.current["rowcount"]
 
-def test_cannot_start_order_without_mechanic():
-    car = Car("Honda", "Civic", "VIN4")
-    order = ServiceOrder(1, car)
-    order.add_service(Service("Диагностика", 1000.0))
+    def fetchone(self):
+        return self.current["one"]
 
-    with pytest.raises(OrderValidationError):
-        order.start_order()
+    def fetchall(self):
+        return self.current["many"]
 
-def test_cannot_start_empty_order():
-    car = Car("Honda", "Civic", "VIN5")
-    mechanic = Mechanic("Петр", "Электрик")
-    order = ServiceOrder(1, car, mechanic=mechanic)
 
-    with pytest.raises(OrderValidationError):
-        order.start_order()
+class FakeConnection:
+    def __init__(self, cursor):
+        self.cursor_object = cursor
+        self.commit_count = 0
+        self.rollback_count = 0
 
-def test_cannot_modify_completed_order():
-    car = Car("Kia", "Rio", "VIN6")
-    mechanic = Mechanic("Сергей", "Маляр")
-    service = Service("Покраска", 5000.0)
+    def cursor(self):
+        return self.cursor_object
 
-    order = ServiceOrder(1, car, mechanic=mechanic)
-    order.add_service(service)
-    order.start_order()
-    order.complete_order()
+    def commit(self):
+        self.commit_count += 1
 
-    with pytest.raises(InvalidStatusError):
-        order.add_service(service)
+    def rollback(self):
+        self.rollback_count += 1
 
-    with pytest.raises(InvalidStatusError):
-        order.assign_mechanic(mechanic)
 
-def test_invalid_discount_parameters():
-    with pytest.raises(DomainError):
-        PercentageDiscount(150)
+def test_save_creates_then_updates():
+    cursor = FakeCursor([result(one=(10,)), result()])
+    connection = FakeConnection(cursor)
+    Model.set_connection(connection)
+    client = Client("Алия", "+77001234567")
 
-    with pytest.raises(DomainError):
-        FixedDiscount(-500)
+    client.save()
+    client.phone = "+77007654321"
+    client.save()
+
+    assert client.id == 10
+    assert cursor.executed[0][1] == ("Алия", "+77001234567")
+    assert cursor.executed[1][1] == ("Алия", "+77007654321", 10)
+    assert connection.commit_count == 2
+
+
+def test_filter_accepts_multiple_equal_conditions_and_greater_than():
+    created_at = datetime(2026, 9, 21, 10, 0)
+    cursor = FakeCursor(
+        [
+            result(
+                ("id", "name", "phone"),
+                many=[(1, "Алия", "+7700")],
+            ),
+            result(
+                ("id", "car_id", "mechanic_id", "status", "created_at"),
+                many=[(2, 4, None, "new", created_at)],
+            ),
+        ]
+    )
+    Model.set_connection(FakeConnection(cursor))
+
+    clients = Client.filter(name="Алия", phone="+7700")
+    orders = ServiceOrder.filter(created_at__greater_than=datetime(2026, 9, 21, 9, 0))
+
+    assert clients[0].name == "Алия"
+    assert orders[0].created_at == created_at
+    assert cursor.executed[0][1] == ("Алия", "+7700")
+    assert cursor.executed[1][1] == (datetime(2026, 9, 21, 9, 0),)
+
+
+def test_one_to_many_and_many_to_many_relations_map_objects():
+    cursor = FakeCursor(
+        [
+            result(
+                ("id", "make", "model", "vin", "owner_id"),
+                many=[(3, "Toyota", "Camry", "VIN-3", 1)],
+            ),
+            result(
+                ("id", "order_id", "service_id", "price"),
+                many=[(8, 4, 5, Decimal("1500.00"))],
+            ),
+            result(
+                ("id", "title", "price"),
+                one=(5, "Замена масла", Decimal("1500.00")),
+            ),
+        ]
+    )
+    Model.set_connection(FakeConnection(cursor))
+    client = Client("Алия", "+7700", id=1)
+    order = ServiceOrder(car_id=3, id=4)
+
+    cars = client.cars.all()
+    services = order.services.all()
+
+    assert cars[0].owner_id == client.id
+    assert services[0].title == "Замена масла"
+
+
+def test_composite_order_operation_uses_one_transaction():
+    cursor = FakeCursor([result(one=(12,)), result(one=(13,))])
+    connection = FakeConnection(cursor)
+    Model.set_connection(connection)
+    car = Car("Toyota", "Camry", "VIN-12", id=7)
+    service = Service("Диагностика", Decimal("3000.00"), id=9)
+
+    order = ServiceOrder.create_with_services(car, [service])
+
+    assert order.id == 12
+    assert cursor.executed[1][1] == (12, 9, Decimal("3000.00"))
+    assert connection.commit_count == 1
+
+
+def test_transaction_rolls_back_after_an_error():
+    connection = FakeConnection(FakeCursor([]))
+    Model.set_connection(connection)
+
+    try:
+        with Model.transaction():
+            raise RuntimeError("failure")
+    except RuntimeError:
+        pass
+
+    assert connection.rollback_count == 1

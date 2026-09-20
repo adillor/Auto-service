@@ -36,6 +36,7 @@ CREATE TABLE service_orders (
     car_id INT NOT NULL REFERENCES cars(id) ON DELETE CASCADE,
     mechanic_id INT REFERENCES mechanics(id) ON DELETE SET NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'new',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     discount_type VARCHAR(50) DEFAULT 'none',
     discount_val1 NUMERIC(10, 2) DEFAULT 0,
     discount_val2 NUMERIC(10, 2) DEFAULT 0
