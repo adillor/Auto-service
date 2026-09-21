@@ -11,4 +11,4 @@ DATABASE_URL = URL.create(
 )
 
 engine = create_engine(DATABASE_URL, connect_args={"connect_timeout": 5})
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
